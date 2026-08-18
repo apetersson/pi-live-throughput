@@ -11,8 +11,8 @@ with:
 - **model id**
 
 When a response finishes, the widget switches to a final summary using the
-provider-reported token count (`usage.output`) and clears after 3 seconds so
-it doesn't linger.
+provider-reported token count (`usage.output`) and stays visible until the
+next response starts streaming.
 
 ## Install
 

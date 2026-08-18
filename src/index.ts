@@ -10,8 +10,8 @@
  *   - model id
  *
  * When the response completes, the display switches to a final summary using
- * the provider-reported token count (usage.output) and clears after a short
- * hold so it does not linger.
+ * the provider-reported token count (usage.output) and stays visible until
+ * the next response starts streaming.
  *
  * Display: widget above the editor (default) or compact footer status line.
  *
@@ -32,7 +32,6 @@ const WIDGET_KEY = "throughput";
 const STATUS_KEY = "throughput";
 const WINDOW_MS = 3000; // rolling window for the live rate
 const UPDATE_INTERVAL_MS = 200; // throttle widget refreshes while streaming
-const DONE_HOLD_MS = 3000; // how long the final summary stays visible
 const CHARS_PER_TOKEN = 4; // heuristic for live token estimation
 
 type DisplayMode = "widget" | "status" | "off";
@@ -54,7 +53,6 @@ interface StreamState {
 export default function (pi: ExtensionAPI) {
 	let mode: DisplayMode = "widget";
 	let stream: StreamState | undefined;
-	let clearTimer: ReturnType<typeof setTimeout> | undefined;
 	let ui: ExtensionUIContext | undefined;
 	let hasUI = false;
 
@@ -104,10 +102,6 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const resetStream = (ctx?: ExtensionContext): void => {
-		if (clearTimer) {
-			clearTimeout(clearTimer);
-			clearTimer = undefined;
-		}
 		stream = {
 			startTime: Date.now(),
 			totalTokens: 0,
@@ -124,8 +118,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
-		if (clearTimer) clearTimeout(clearTimer);
-		clearTimer = undefined;
 		clearUi();
 		stream = undefined;
 		ui = undefined;
@@ -159,10 +151,6 @@ export default function (pi: ExtensionAPI) {
 		const usage = event.message.usage;
 		const output = usage?.output ?? Math.round(stream.totalTokens);
 		render({ outputTokens: output });
-		clearTimer = setTimeout(() => {
-			clearUi();
-			stream = undefined;
-		}, DONE_HOLD_MS);
 	});
 
 	pi.registerCommand("throughput", {
