@@ -98,15 +98,9 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const lines = final
-			? [
-					`✓ ${fmt(total)} tok in ${elapsedSec.toFixed(1)}s · ${fmtRate(avg)} tok/s avg`,
-					`peak ${fmtRate(stream.peakRate)} tok/s · ${model}`,
-				]
-			: [
-					`⚡ ${fmtRate(live)} tok/s · avg ${fmtRate(avg)} tok/s`,
-					`${fmt(total)} tok · ${elapsedSec.toFixed(1)}s · ${model}`,
-				];
-		ui?.setWidget(WIDGET_KEY, lines);
+			? `✓ ${fmt(total)} tok in ${elapsedSec.toFixed(1)}s · ${fmtRate(avg)} tok/s avg · peak ${fmtRate(stream.peakRate)} tok/s${model ? ` · ${model}` : ""}`
+			: `⚡ ${fmtRate(live)} tok/s · avg ${fmtRate(avg)} tok/s · ${fmt(total)} tok · ${elapsedSec.toFixed(1)}s${model ? ` · ${model}` : ""}`;
+		ui?.setWidget(WIDGET_KEY, [lines]);
 	};
 
 	const resetStream = (ctx?: ExtensionContext): void => {
