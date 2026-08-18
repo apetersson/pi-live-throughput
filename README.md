@@ -1,65 +1,67 @@
 # pi-live-throughput
 
-Live tokens/sec throughput display for the [Pi coding agent](https://pi.dev).
+A single-line live tokens/sec display for the [Pi coding agent](https://pi.dev).
 
-While the model streams a response, shows a live widget (above the editor)
-with:
+While an assistant response streams, the extension shows its rolling throughput,
+average throughput, estimated output tokens, elapsed time, and model:
 
-- **live tok/s** over a rolling 3-second window
-- **average tok/s** for the current response
-- **estimated total tokens** and elapsed time
-- **model id**
+```text
+⚡ 42.3 tok/s · avg 38.1 tok/s · 1.2k tok · 14.2s · deepseek-v4-flash
+```
 
-When a response finishes, the widget switches to a final summary using the
-provider-reported token count (`usage.output`) and stays visible until the
-next response starts streaming.
+When streaming finishes, it replaces the live metrics with a final summary that
+stays visible until the next assistant response starts:
+
+```text
+✓ 512 tok in 2.0s · 250 tok/s avg · peak 319 tok/s · deepseek-v4-flash
+```
+
+Live figures are estimates based on streamed text, thinking, and tool-call
+deltas. The final token count uses Pi's provider-reported `usage.output` value.
 
 ## Install
 
-From this directory (local path install):
+Install directly from GitHub:
 
 ```bash
-pi install /Users/andreas/code/pi-live-throughput
+pi install git:github.com/apetersson/pi-live-throughput
 ```
 
-Or from a git URL once pushed:
+For local development, install the checkout instead:
 
 ```bash
-pi install git:github.com/<you>/pi-live-throughput
+pi install /absolute/path/to/pi-live-throughput
 ```
 
-Or quick-test without installing:
+Use `/reload` if Pi was already running when you installed or changed the
+extension.
 
-```bash
-pi -e ./src/index.ts
-```
+## Commands
 
-## Usage
-
-The display is on by default as a widget above the editor.
+The widget is enabled above the editor by default.
 
 | Command | Effect |
-|---------|--------|
-| `/throughput` | Toggle on/off |
-| `/throughput on` / `off` | Force on/off |
-| `/throughput widget` | Widget above the editor (default) |
-| `/throughput status` | Compact footer status line (`⚡ 42 tok/s`) |
-| `/throughput reset` | Reset the current stream counters |
-
-## How it works
-
-- Subscribes to `message_update` events and counts streamed deltas
-  (`text_delta`, `thinking_delta`, `toolcall_delta`).
-- Live token estimates use the `~4 chars/token` heuristic.
-- The final summary after each response uses the exact `usage.output`
-  token count reported by the provider.
-- Widget updates are throttled to ~200ms while streaming.
+| --- | --- |
+| `/throughput` | Toggle the display on or off |
+| `/throughput on` | Enable the widget |
+| `/throughput off` | Hide the display |
+| `/throughput widget` | Show the full single-line widget above the editor |
+| `/throughput status` | Show a compact footer status instead |
+| `/throughput reset` | Reset metrics for the current response |
 
 ## Development
 
+This project uses pnpm only:
+
 ```bash
-npm install
-npm run check   # typecheck with tsc --noEmit
+pnpm install --frozen-lockfile
+pnpm run check
+```
+
+To load the local extension without installing it:
+
+```bash
+pi -e ./src/index.ts
 ```
 
 ## License
