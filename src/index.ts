@@ -1,115 +1,108 @@
 /**
- * pi-live-throughput
- *
  * Live tokens/sec throughput display for the Pi coding agent.
  *
- * While a model response is streaming, shows:
- *   - live tok/s over a rolling window (3s)
- *   - average tok/s for the current response
- *   - estimated total tokens and elapsed time
- *   - model id
- *
- * When the response completes, the display switches to a final summary using
- * the provider-reported token count (usage.output) and stays visible until
- * the next response starts streaming.
- *
- * Display: widget above the editor (default) or compact footer status line.
- *
- * Commands:
- *   /throughput           toggle on/off
- *   /throughput on|off    force on/off
- *   /throughput widget    widget above the editor
- *   /throughput status    compact status line
- *   /throughput reset     reset the current stream
- *
- * Note: live figures are estimates (~4 chars/token); the final summary uses
- * the exact provider token count.
+ * The default widget uses one line while streaming and replaces it with a
+ * provider-usage summary that remains visible until the next response starts.
+ * Live estimates count text, thinking, and tool-call delta characters using a
+ * four-characters-per-token heuristic.
  */
 
-import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 
 const WIDGET_KEY = "throughput";
 const STATUS_KEY = "throughput";
-const WINDOW_MS = 3000; // rolling window for the live rate
-const UPDATE_INTERVAL_MS = 200; // throttle widget refreshes while streaming
-const CHARS_PER_TOKEN = 4; // heuristic for live token estimation
+const WINDOW_MS = 3000;
+const UPDATE_INTERVAL_MS = 200;
+const CHARS_PER_TOKEN = 4;
 
-type DisplayMode = "widget" | "status" | "off";
+type DisplayMode = "widget" | "status";
 
 interface Sample {
 	t: number;
-	tokens: number;
+	chars: number;
 }
 
-interface StreamState {
-	startTime: number;
-	totalTokens: number;
+interface StreamingState {
+	kind: "streaming";
+	responseStartTime: number;
+	measurementStartTime: number;
+	totalChars: number;
 	samples: Sample[];
 	peakRate: number;
 	lastRender: number;
 	model: string;
 }
 
+interface FinalState {
+	kind: "final";
+	outputTokens: number;
+	elapsedSec: number;
+	averageRate: number;
+	peakRate: number;
+	model: string;
+}
+
+type ThroughputState = StreamingState | FinalState;
+
 export default function (pi: ExtensionAPI) {
 	let mode: DisplayMode = "widget";
-	let stream: StreamState | undefined;
+	let enabled = true;
+	let state: ThroughputState | undefined;
 	let ui: ExtensionUIContext | undefined;
 	let hasUI = false;
 
 	const fmt = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n)}`);
-
-	const fmtRate = (r: number): string => (r >= 100 ? r.toFixed(0) : r.toFixed(1));
-
-	const estTokens = (delta: string): number => Math.max(1, Math.round(delta.length / CHARS_PER_TOKEN));
-
-	const liveRate = (now: number): number => {
-		if (!stream) return 0;
-		const cutoff = now - WINDOW_MS;
-		stream.samples = stream.samples.filter((s) => s.t >= cutoff);
-		if (stream.samples.length < 2) return 0; // need a real span, not a 1ms spike
-		const span = Math.max(now - stream.samples[0]!.t, 1);
-		const tokens = stream.samples.reduce((sum, s) => sum + s.tokens, 0);
-		return (tokens / span) * 1000;
-	};
+	const fmtRate = (rate: number): string => (rate >= 100 ? rate.toFixed(0) : rate.toFixed(1));
+	const estimatedTokens = (chars: number): number => chars / CHARS_PER_TOKEN;
 
 	const clearUi = (): void => {
 		ui?.setWidget(WIDGET_KEY, undefined);
 		ui?.setStatus(STATUS_KEY, undefined);
 	};
 
-	const render = (final?: { outputTokens: number }): void => {
-		if (!stream || !hasUI || mode === "off") return;
-		const now = Date.now();
-		const elapsedSec = (now - stream.startTime) / 1000;
-		const live = liveRate(now);
-		stream.peakRate = Math.max(stream.peakRate, live);
-		const total = final ? final.outputTokens : stream.totalTokens;
-		const avg = total / Math.max(elapsedSec, 0.001);
-		const model = stream.model;
+	const rollingRate = (stream: StreamingState, now: number): number => {
+		const windowStart = Math.max(stream.measurementStartTime, now - WINDOW_MS);
+		stream.samples = stream.samples.filter((sample) => sample.t >= windowStart);
+		const elapsedMs = now - windowStart;
+		if (elapsedMs <= 0 || stream.samples.length === 0) return 0;
+		const chars = stream.samples.reduce((sum, sample) => sum + sample.chars, 0);
+		return estimatedTokens(chars) / (elapsedMs / 1000);
+	};
 
+	const showLine = (line: string): void => {
 		if (mode === "status") {
-			const text = final
-				? `✓ ${fmt(total)} tok · ${fmtRate(avg)} tok/s`
-				: `⚡ ${fmtRate(live)} tok/s · ${fmt(total)} tok`;
-			ui?.setStatus(STATUS_KEY, text);
+			ui?.setWidget(WIDGET_KEY, undefined);
+			ui?.setStatus(STATUS_KEY, line);
+		} else {
+			ui?.setStatus(STATUS_KEY, undefined);
+			ui?.setWidget(WIDGET_KEY, [line]);
+		}
+	};
+
+	const render = (): void => {
+		if (!state || !hasUI || !enabled) return;
+
+		if (state.kind === "final") {
+			const model = state.model ? ` · ${state.model}` : "";
+			const line =
+				mode === "status"
+					? `✓ ${fmt(state.outputTokens)} tok · ${fmtRate(state.averageRate)} tok/s`
+					: `✓ ${fmt(state.outputTokens)} tok in ${state.elapsedSec.toFixed(1)}s · ${fmtRate(state.averageRate)} tok/s avg · peak ${fmtRate(state.peakRate)} tok/s${model}`;
+			showLine(line);
 			return;
 		}
 
-		const lines = final
-			? `✓ ${fmt(total)} tok in ${elapsedSec.toFixed(1)}s · ${fmtRate(avg)} tok/s avg · peak ${fmtRate(stream.peakRate)} tok/s${model ? ` · ${model}` : ""}`
-			: `⚡ ${fmtRate(live)} tok/s · avg ${fmtRate(avg)} tok/s · ${fmt(total)} tok · ${elapsedSec.toFixed(1)}s${model ? ` · ${model}` : ""}`;
-		ui?.setWidget(WIDGET_KEY, [lines]);
-	};
-
-	const resetStream = (ctx?: ExtensionContext): void => {
-		stream = {
-			startTime: Date.now(),
-			totalTokens: 0,
-			samples: [],
-			peakRate: 0,
-			lastRender: 0,
-			model: ctx?.model?.id ?? "",
-		};
+		const now = Date.now();
+		const live = rollingRate(state, now);
+		state.peakRate = Math.max(state.peakRate, live);
+		const elapsedSec = (now - state.measurementStartTime) / 1000;
+		const averageRate = estimatedTokens(state.totalChars) / Math.max(elapsedSec, 0.001);
+		const model = state.model ? ` · ${state.model}` : "";
+		const line =
+			mode === "status"
+				? `⚡ ${fmtRate(live)} tok/s · ${fmt(estimatedTokens(state.totalChars))} tok`
+				: `⚡ ${fmtRate(live)} tok/s · avg ${fmtRate(averageRate)} tok/s · ${fmt(estimatedTokens(state.totalChars))} tok · ${elapsedSec.toFixed(1)}s${model}`;
+		showLine(line);
 	};
 
 	pi.on("session_start", (_event, ctx) => {
@@ -119,38 +112,69 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		clearUi();
-		stream = undefined;
+		state = undefined;
 		ui = undefined;
 		hasUI = false;
 	});
 
 	pi.on("message_start", (event, ctx) => {
 		if (event.message.role !== "assistant") return;
-		resetStream(ctx);
+		ui = ctx.ui;
+		hasUI = ctx.hasUI;
+		const now = Date.now();
+		state = {
+			kind: "streaming",
+			responseStartTime: now,
+			measurementStartTime: now,
+			totalChars: 0,
+			samples: [],
+			peakRate: 0,
+			lastRender: now,
+			model: event.message.responseModel ?? event.message.model ?? ctx.model?.id ?? "",
+		};
 		render();
 	});
 
 	pi.on("message_update", (event, ctx) => {
-		if (event.message.role !== "assistant" || !stream) return;
+		if (event.message.role !== "assistant" || state?.kind !== "streaming") return;
 		ui = ctx.ui;
 		hasUI = ctx.hasUI;
-		const ev = event.assistantMessageEvent;
-		if (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta") {
-			const now = Date.now();
-			stream.totalTokens += estTokens(ev.delta);
-			stream.samples.push({ t: now, tokens: estTokens(ev.delta) });
-			if (now - stream.lastRender >= UPDATE_INTERVAL_MS) {
-				stream.lastRender = now;
-				render();
-			}
+		const stream = state;
+		stream.model = event.message.responseModel ?? event.message.model ?? stream.model;
+		const update = event.assistantMessageEvent;
+		if (update.type !== "text_delta" && update.type !== "thinking_delta" && update.type !== "toolcall_delta") {
+			return;
+		}
+
+		const chars = update.delta.length;
+		if (chars === 0) return;
+		const now = Date.now();
+		stream.totalChars += chars;
+		stream.samples.push({ t: now, chars });
+		if (now - stream.lastRender >= UPDATE_INTERVAL_MS) {
+			stream.lastRender = now;
+			render();
 		}
 	});
 
-	pi.on("message_end", (event) => {
-		if (event.message.role !== "assistant" || !stream) return;
-		const usage = event.message.usage;
-		const output = usage?.output ?? Math.round(stream.totalTokens);
-		render({ outputTokens: output });
+	pi.on("message_end", (event, ctx) => {
+		if (event.message.role !== "assistant" || state?.kind !== "streaming") return;
+		ui = ctx.ui;
+		hasUI = ctx.hasUI;
+		const now = Date.now();
+		const stream = state;
+		const peakRate = Math.max(stream.peakRate, rollingRate(stream, now));
+		const elapsedSec = (now - stream.responseStartTime) / 1000;
+		const outputTokens = event.message.usage.output;
+		state = {
+			kind: "final",
+			outputTokens,
+			elapsedSec,
+			averageRate: outputTokens / Math.max(elapsedSec, 0.001),
+			peakRate,
+			model: event.message.responseModel ?? event.message.model ?? stream.model,
+		};
+		render();
 	});
 
 	pi.registerCommand("throughput", {
@@ -161,36 +185,50 @@ export default function (pi: ExtensionAPI) {
 			const arg = args.trim().toLowerCase();
 
 			if (!arg || arg === "toggle") {
-				mode = mode === "off" ? "widget" : "off";
-				if (mode === "off") clearUi();
-				else render();
-				ctx.ui.notify(`Live throughput: ${mode}`, "info");
+				enabled = !enabled;
+				if (enabled) render();
+				else clearUi();
+				ctx.ui.notify(`Live throughput: ${enabled ? mode : "off"}`, "info");
 				return;
 			}
 
 			switch (arg) {
 				case "on":
-					mode = mode === "off" ? "widget" : mode;
+					enabled = true;
 					render();
 					ctx.ui.notify(`Live throughput: ${mode}`, "info");
 					return;
 				case "off":
-					mode = "off";
+					enabled = false;
 					clearUi();
 					ctx.ui.notify("Live throughput: off", "info");
 					return;
 				case "widget":
 				case "status":
 					mode = arg;
+					enabled = true;
 					clearUi();
 					render();
 					ctx.ui.notify(`Live throughput: ${mode}`, "info");
 					return;
 				case "reset":
-					resetStream(ctx);
-					clearUi();
-					if (mode !== "off") render();
-					ctx.ui.notify("Throughput stream reset", "info");
+					if (state?.kind === "streaming") {
+						const now = Date.now();
+						state.measurementStartTime = now;
+						state.totalChars = 0;
+						state.samples = [];
+						state.peakRate = 0;
+						state.lastRender = now;
+						clearUi();
+						render();
+						ctx.ui.notify("Current throughput metrics reset", "info");
+					} else if (state?.kind === "final") {
+						state = undefined;
+						clearUi();
+						ctx.ui.notify("Final throughput summary cleared", "info");
+					} else {
+						ctx.ui.notify("No throughput metrics to reset", "info");
+					}
 					return;
 				default:
 					ctx.ui.notify("Usage: /throughput [on|off|widget|status|reset|toggle]", "error");
