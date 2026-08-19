@@ -21,7 +21,13 @@ deltas. The final token count uses Pi's provider-reported `usage.output` value.
 
 ## Install
 
-Install directly from GitHub:
+Install from npm:
+
+```bash
+pi install npm:pi-live-throughput
+```
+
+Alternatively, install directly from GitHub:
 
 ```bash
 pi install git:github.com/apetersson/pi-live-throughput

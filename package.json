@@ -1,6 +1,6 @@
 {
 	"name": "pi-live-throughput",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Live tokens/sec throughput display for the Pi coding agent",
 	"keywords": [
 		"pi-package",
