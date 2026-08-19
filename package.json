@@ -9,6 +9,7 @@
 		"throughput"
 	],
 	"type": "module",
+	"packageManager": "pnpm@11.13.0",
 	"files": [
 		"src",
 		"README.md",
