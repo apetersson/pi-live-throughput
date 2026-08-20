@@ -43,11 +43,11 @@ interface StreamingState {
 }
 
 interface PromptMetrics {
-	inputTokens?: number;
-	cacheReadTokens?: number;
-	cacheWriteTokens?: number;
-	ttftMs?: number;
-	approximatePromptRate?: number;
+	inputTokens: number | undefined;
+	cacheReadTokens: number | undefined;
+	cacheWriteTokens: number | undefined;
+	ttftMs: number | undefined;
+	approximatePromptRate: number | undefined;
 }
 
 interface FinalState {
@@ -62,7 +62,7 @@ interface FinalState {
 
 type ThroughputState = StreamingState | FinalState;
 
-export default function (pi: ExtensionAPI) {
+export default function (pi: ExtensionAPI): void {
 	let mode: DisplayMode = "widget";
 	let enabled = true;
 	let state: ThroughputState | undefined;
@@ -70,9 +70,9 @@ export default function (pi: ExtensionAPI) {
 	let hasUI = false;
 	let pendingProviderRequestTime: number | undefined;
 
-	const fmt = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n)}`);
+	const fmt = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 	const fmtRate = (rate: number): string => (rate >= 100 ? rate.toFixed(0) : rate.toFixed(1));
-	const fmtTtft = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`);
+	const fmtTtft = (ms: number): string => (ms < 1000 ? `${String(Math.round(ms))}ms` : `${(ms / 1000).toFixed(2)}s`);
 	const estimatedTokens = (chars: number): number => chars / CHARS_PER_TOKEN;
 	const positiveMetric = (value: number): number | undefined =>
 		Number.isFinite(value) && value > 0 ? value : undefined;
@@ -95,7 +95,10 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	const promptMetrics = (stream: StreamingState, usage: { input: number; cacheRead: number; cacheWrite: number }): PromptMetrics => {
+	const promptMetrics = (
+		stream: StreamingState,
+		usage: { input: number; cacheRead: number; cacheWrite: number },
+	): PromptMetrics => {
 		const inputTokens = positiveMetric(usage.input);
 		const cacheReadTokens = positiveMetric(usage.cacheRead);
 		const cacheWriteTokens = positiveMetric(usage.cacheWrite);
@@ -215,7 +218,7 @@ export default function (pi: ExtensionAPI) {
 			samples: [],
 			peakRate: 0,
 			lastRender: now,
-			model: event.message.responseModel ?? event.message.model ?? ctx.model?.id ?? "",
+			model: event.message.responseModel ?? event.message.model,
 		};
 		pendingProviderRequestTime = undefined;
 		render();
@@ -226,7 +229,7 @@ export default function (pi: ExtensionAPI) {
 		ui = ctx.ui;
 		hasUI = ctx.hasUI;
 		const stream = state;
-		stream.model = event.message.responseModel ?? event.message.model ?? stream.model;
+		stream.model = event.message.responseModel ?? event.message.model;
 		const update = event.assistantMessageEvent;
 		const now = Date.now();
 		const isDelta =
@@ -280,7 +283,7 @@ export default function (pi: ExtensionAPI) {
 			elapsedSec,
 			averageRate: outputTokens / Math.max(elapsedSec, 0.001),
 			peakRate,
-			model: event.message.responseModel ?? event.message.model ?? stream.model,
+			model: event.message.responseModel ?? event.message.model,
 			prompt: promptMetrics(stream, event.message.usage),
 		};
 		render();
@@ -288,7 +291,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("throughput", {
 		description: "Show live tokens/sec. Args: on|off|widget|status|reset",
-		handler: async (args, ctx) => {
+		handler: (args, ctx) => {
 			ui = ctx.ui;
 			hasUI = ctx.hasUI;
 			const arg = args.trim().toLowerCase();
@@ -298,7 +301,7 @@ export default function (pi: ExtensionAPI) {
 				if (enabled) render();
 				else clearUi();
 				ctx.ui.notify(`Live throughput: ${enabled ? mode : "off"}`, "info");
-				return;
+				return Promise.resolve();
 			}
 
 			switch (arg) {
@@ -306,12 +309,12 @@ export default function (pi: ExtensionAPI) {
 					enabled = true;
 					render();
 					ctx.ui.notify(`Live throughput: ${mode}`, "info");
-					return;
+					return Promise.resolve();
 				case "off":
 					enabled = false;
 					clearUi();
 					ctx.ui.notify("Live throughput: off", "info");
-					return;
+					return Promise.resolve();
 				case "widget":
 				case "status":
 					mode = arg;
@@ -319,7 +322,7 @@ export default function (pi: ExtensionAPI) {
 					clearUi();
 					render();
 					ctx.ui.notify(`Live throughput: ${mode}`, "info");
-					return;
+					return Promise.resolve();
 				case "reset":
 					if (state?.kind === "streaming") {
 						const now = Date.now();
@@ -340,9 +343,10 @@ export default function (pi: ExtensionAPI) {
 					} else {
 						ctx.ui.notify("No throughput metrics to reset", "info");
 					}
-					return;
+					return Promise.resolve();
 				default:
 					ctx.ui.notify("Usage: /throughput [on|off|widget|status|reset|toggle]", "error");
+					return Promise.resolve();
 			}
 		},
 	});

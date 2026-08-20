@@ -206,7 +206,11 @@ test("reports cached prompt metrics and excludes cache reads from approximate pr
 		assert.deepEqual(view.widget, [
 			"✓ 50 tok in 0.9s · 55.6 tok/s avg · peak 15.0 tok/s · input 200 tok · cache read 800 tok · cache write 100 tok · TTFT 300ms · approx. prompt 1000 tok/s · test-model",
 		]);
-		assert.doesNotMatch(view.widget[0], /approx\. prompt 3\.7k tok\/s/, "cache reads are not treated as processed tokens");
+		assert.doesNotMatch(
+			view.widget[0],
+			/approx\. prompt 3\.7k tok\/s/,
+			"cache reads are not treated as processed tokens",
+		);
 	});
 });
 

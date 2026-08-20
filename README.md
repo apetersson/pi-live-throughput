@@ -71,23 +71,27 @@ extension.
 
 The widget is enabled above the editor by default.
 
-| Command | Effect |
-| --- | --- |
-| `/throughput` | Toggle the display on or off |
-| `/throughput on` | Enable the previously selected display mode |
-| `/throughput off` | Hide the display |
-| `/throughput widget` | Enable the full single-line widget above the editor |
-| `/throughput status` | Enable a compact footer status instead |
-| `/throughput reset` | Reset an active measurement or clear the final summary |
+| Command              | Effect                                                 |
+| -------------------- | ------------------------------------------------------ |
+| `/throughput`        | Toggle the display on or off                           |
+| `/throughput on`     | Enable the previously selected display mode            |
+| `/throughput off`    | Hide the display                                       |
+| `/throughput widget` | Enable the full single-line widget above the editor    |
+| `/throughput status` | Enable a compact footer status instead                 |
+| `/throughput reset`  | Reset an active measurement or clear the final summary |
 
 ## Development
 
-This project uses pnpm only:
+This project uses pnpm only. The verification command checks Prettier formatting,
+strict TypeScript compilation, zero-warning ESLint, and the test suite:
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm run verify
 ```
+
+Apply formatting with `pnpm run format`. Run individual checks with
+`pnpm run format:check`, `pnpm run check`, `pnpm run lint`, or `pnpm run test`.
 
 To load the local extension without installing it:
 
