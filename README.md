@@ -10,10 +10,11 @@ average throughput, estimated output tokens, elapsed time, and model:
 ```
 
 When streaming finishes, it replaces the live metrics with a final summary that
-stays visible until the next assistant response starts:
+stays visible until the next assistant response starts. Prompt fields are added
+when Pi exposes usable normalized values:
 
 ```text
-✓ 512 tok in 2.0s · 256 tok/s avg · peak 319 tok/s · deepseek-v4-flash
+✓ 512 tok in 2.0s · 256 tok/s avg · peak 319 tok/s · input 1.2k tok · cache read 8.0k tok · TTFT 420ms · approx. prompt 2900 tok/s · deepseek-v4-flash
 ```
 
 Live figures use Pi's cumulative provider-reported `usage.output` value when it
@@ -21,6 +22,27 @@ advances during streaming. Providers that expose usage only after completion
 fall back to text, thinking, and tool-call delta estimates, identified by
 `est.` rates and `~` token counts. The final token count always uses the
 provider-reported value.
+
+## Prompt and cache metrics
+
+Pi normalizes prompt usage into separate `input`, `cacheRead`, and `cacheWrite`
+counts. `input` is the uncached, non-cache-write portion; cache-read tokens are
+shown separately and are never described as tokens processed by the model.
+Because Pi initializes unavailable usage fields to zero, this extension reports
+only positive prompt/cache counts rather than presenting a zero as confirmed
+provider data.
+
+TTFT (time to first output) is measured from Pi's `before_provider_request`
+boundary to the first substantive text, thinking, or tool-call output event. It
+is omitted if either boundary is unavailable. TTFT is an end-to-end observation:
+it can include network latency, provider queueing and routing, cache lookup, and
+model startup, not just model prefill.
+
+`approx. prompt` is a best-effort estimate calculated as
+`(input + cacheWrite) / TTFT`. It is shown only when both a positive processed
+prompt-token count and a positive TTFT are available. Cache-read tokens are
+excluded. The estimate is not true model prefill throughput because its timing
+contains the end-to-end latency above.
 
 ## Install
 

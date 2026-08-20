@@ -42,13 +42,24 @@ function createHarness() {
 	return { handlers, commands, ctx, view };
 }
 
-function assistantMessage({ model = "test-model", responseModel, output = 0 } = {}) {
+function assistantMessage({
+	model = "test-model",
+	responseModel,
+	input = 0,
+	output = 0,
+	cacheRead = 0,
+	cacheWrite = 0,
+} = {}) {
 	return {
 		role: "assistant",
 		model,
 		responseModel,
-		usage: { output },
+		usage: { input, output, cacheRead, cacheWrite },
 	};
+}
+
+function providerRequest(harness) {
+	harness.handlers.get("before_provider_request")({ type: "before_provider_request", payload: {} }, harness.ctx);
 }
 
 function update(harness, delta, type = "text_delta", output = 0) {
@@ -173,6 +184,86 @@ test("observes provider usage on updates without content deltas", async () => {
 		setNow(2000);
 		handlers.get("message_end")({ message: assistantMessage({ output: 80 }) }, ctx);
 		assert.deepEqual(view.widget, ["✓ 80 tok in 1.0s · 80.0 tok/s avg · peak 200 tok/s · test-model"]);
+	});
+});
+
+test("reports cached prompt metrics and excludes cache reads from approximate processing", async () => {
+	await withFakeClock(async (setNow) => {
+		const harness = createHarness();
+		const { handlers, ctx, view } = harness;
+
+		providerRequest(harness);
+		setNow(1100);
+		handlers.get("message_start")({ message: assistantMessage() }, ctx);
+		setNow(1300);
+		update(harness, "first output");
+		setNow(2000);
+		handlers.get("message_end")(
+			{ message: assistantMessage({ input: 200, output: 50, cacheRead: 800, cacheWrite: 100 }) },
+			ctx,
+		);
+
+		assert.deepEqual(view.widget, [
+			"✓ 50 tok in 0.9s · 55.6 tok/s avg · peak 15.0 tok/s · input 200 tok · cache read 800 tok · cache write 100 tok · TTFT 300ms · approx. prompt 1000 tok/s · test-model",
+		]);
+		assert.doesNotMatch(view.widget[0], /approx\. prompt 3\.7k tok\/s/, "cache reads are not treated as processed tokens");
+	});
+});
+
+test("reports uncached input and request-boundary TTFT without cache placeholders", async () => {
+	await withFakeClock(async (setNow) => {
+		const harness = createHarness();
+		const { handlers, ctx, view } = harness;
+
+		providerRequest(harness);
+		setNow(1200);
+		handlers.get("message_start")({ message: assistantMessage() }, ctx);
+		setNow(1500);
+		update(harness, "first output");
+		setNow(2000);
+		handlers.get("message_end")({ message: assistantMessage({ input: 600, output: 40 }) }, ctx);
+
+		assert.match(view.widget[0], /input 600 tok · TTFT 500ms · approx\. prompt 1200 tok\/s/);
+		assert.doesNotMatch(view.widget[0], /cache (read|write)/);
+	});
+});
+
+test("omits unavailable and partially reported prompt metrics cleanly", async () => {
+	await withFakeClock(async (setNow) => {
+		const partial = createHarness();
+		partial.handlers.get("message_start")({ message: assistantMessage() }, partial.ctx);
+		setNow(1500);
+		partial.handlers.get("message_end")({ message: assistantMessage({ input: 250, output: 10 }) }, partial.ctx);
+		assert.match(partial.view.widget[0], /input 250 tok/);
+		assert.doesNotMatch(partial.view.widget[0], /cache|TTFT|approx\. prompt/);
+
+		setNow(2000);
+		const unavailable = createHarness();
+		providerRequest(unavailable);
+		setNow(2200);
+		unavailable.handlers.get("message_start")({ message: assistantMessage() }, unavailable.ctx);
+		setNow(2400);
+		update(unavailable, "first output");
+		setNow(3000);
+		unavailable.handlers.get("message_end")({ message: assistantMessage({ output: 10 }) }, unavailable.ctx);
+		assert.match(unavailable.view.widget[0], /TTFT 400ms/);
+		assert.doesNotMatch(unavailable.view.widget[0], /input|cache|approx\. prompt/);
+	});
+});
+
+test("omits TTFT and approximate prompt rate when no output arrives", async () => {
+	await withFakeClock(async (setNow) => {
+		const harness = createHarness();
+		const { handlers, ctx, view } = harness;
+
+		providerRequest(harness);
+		setNow(1100);
+		handlers.get("message_start")({ message: assistantMessage() }, ctx);
+		setNow(2000);
+		handlers.get("message_end")({ message: assistantMessage({ input: 300 }) }, ctx);
+
+		assert.match(view.widget[0], /input 300 tok/);
+		assert.doesNotMatch(view.widget[0], /TTFT|approx\. prompt/);
 	});
 });
 

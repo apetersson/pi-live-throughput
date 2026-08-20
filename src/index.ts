@@ -6,6 +6,8 @@
  * Live metrics prefer cumulative provider usage when it advances during the
  * stream. Until then, clearly labeled estimates count text, thinking, and
  * tool-call delta characters using a four-characters-per-token heuristic.
+ * Final summaries also report conservatively available prompt/cache usage and
+ * request-boundary-to-first-output timing.
  */
 
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
@@ -26,6 +28,8 @@ interface Sample {
 interface StreamingState {
 	kind: "streaming";
 	responseStartTime: number;
+	providerRequestTime: number | undefined;
+	firstOutputTime: number | undefined;
 	measurementStartTime: number;
 	totalChars: number;
 	providerOutputBaseline: number;
@@ -38,6 +42,14 @@ interface StreamingState {
 	model: string;
 }
 
+interface PromptMetrics {
+	inputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+	ttftMs?: number;
+	approximatePromptRate?: number;
+}
+
 interface FinalState {
 	kind: "final";
 	outputTokens: number;
@@ -45,6 +57,7 @@ interface FinalState {
 	averageRate: number;
 	peakRate: number;
 	model: string;
+	prompt: PromptMetrics;
 }
 
 type ThroughputState = StreamingState | FinalState;
@@ -55,10 +68,58 @@ export default function (pi: ExtensionAPI) {
 	let state: ThroughputState | undefined;
 	let ui: ExtensionUIContext | undefined;
 	let hasUI = false;
+	let pendingProviderRequestTime: number | undefined;
 
 	const fmt = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n)}`);
 	const fmtRate = (rate: number): string => (rate >= 100 ? rate.toFixed(0) : rate.toFixed(1));
+	const fmtTtft = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`);
 	const estimatedTokens = (chars: number): number => chars / CHARS_PER_TOKEN;
+	const positiveMetric = (value: number): number | undefined =>
+		Number.isFinite(value) && value > 0 ? value : undefined;
+	const isFirstOutputEvent = (update: { type: string; delta?: string; content?: string }): boolean => {
+		switch (update.type) {
+			case "text_start":
+			case "thinking_start":
+			case "toolcall_start":
+			case "toolcall_end":
+				return true;
+			case "text_delta":
+			case "thinking_delta":
+			case "toolcall_delta":
+				return (update.delta?.length ?? 0) > 0;
+			case "text_end":
+			case "thinking_end":
+				return (update.content?.length ?? 0) > 0;
+			default:
+				return false;
+		}
+	};
+
+	const promptMetrics = (stream: StreamingState, usage: { input: number; cacheRead: number; cacheWrite: number }): PromptMetrics => {
+		const inputTokens = positiveMetric(usage.input);
+		const cacheReadTokens = positiveMetric(usage.cacheRead);
+		const cacheWriteTokens = positiveMetric(usage.cacheWrite);
+		const ttftMs =
+			stream.providerRequestTime !== undefined && stream.firstOutputTime !== undefined
+				? Math.max(0, stream.firstOutputTime - stream.providerRequestTime)
+				: undefined;
+		const processedTokens = (inputTokens ?? 0) + (cacheWriteTokens ?? 0);
+		const approximatePromptRate =
+			processedTokens > 0 && ttftMs !== undefined && ttftMs > 0 ? processedTokens / (ttftMs / 1000) : undefined;
+		return { inputTokens, cacheReadTokens, cacheWriteTokens, ttftMs, approximatePromptRate };
+	};
+
+	const promptSummary = (prompt: PromptMetrics): string => {
+		const parts: string[] = [];
+		if (prompt.inputTokens !== undefined) parts.push(`input ${fmt(prompt.inputTokens)} tok`);
+		if (prompt.cacheReadTokens !== undefined) parts.push(`cache read ${fmt(prompt.cacheReadTokens)} tok`);
+		if (prompt.cacheWriteTokens !== undefined) parts.push(`cache write ${fmt(prompt.cacheWriteTokens)} tok`);
+		if (prompt.ttftMs !== undefined) parts.push(`TTFT ${fmtTtft(prompt.ttftMs)}`);
+		if (prompt.approximatePromptRate !== undefined) {
+			parts.push(`approx. prompt ${fmtRate(prompt.approximatePromptRate)} tok/s`);
+		}
+		return parts.join(" · ");
+	};
 
 	const clearUi = (): void => {
 		ui?.setWidget(WIDGET_KEY, undefined);
@@ -92,10 +153,12 @@ export default function (pi: ExtensionAPI) {
 
 		if (state.kind === "final") {
 			const model = state.model ? ` · ${state.model}` : "";
+			const prompt = promptSummary(state.prompt);
+			const promptSuffix = prompt ? ` · ${prompt}` : "";
 			const line =
 				mode === "status"
-					? `✓ ${fmt(state.outputTokens)} tok · ${fmtRate(state.averageRate)} tok/s`
-					: `✓ ${fmt(state.outputTokens)} tok in ${state.elapsedSec.toFixed(1)}s · ${fmtRate(state.averageRate)} tok/s avg · peak ${fmtRate(state.peakRate)} tok/s${model}`;
+					? `✓ ${fmt(state.outputTokens)} tok · ${fmtRate(state.averageRate)} tok/s${promptSuffix}`
+					: `✓ ${fmt(state.outputTokens)} tok in ${state.elapsedSec.toFixed(1)}s · ${fmtRate(state.averageRate)} tok/s avg · peak ${fmtRate(state.peakRate)} tok/s${promptSuffix}${model}`;
 			showLine(line);
 			return;
 		}
@@ -124,8 +187,13 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => {
 		clearUi();
 		state = undefined;
+		pendingProviderRequestTime = undefined;
 		ui = undefined;
 		hasUI = false;
+	});
+
+	pi.on("before_provider_request", () => {
+		pendingProviderRequestTime = Date.now();
 	});
 
 	pi.on("message_start", (event, ctx) => {
@@ -136,6 +204,8 @@ export default function (pi: ExtensionAPI) {
 		state = {
 			kind: "streaming",
 			responseStartTime: now,
+			providerRequestTime: pendingProviderRequestTime,
+			firstOutputTime: undefined,
 			measurementStartTime: now,
 			totalChars: 0,
 			providerOutputBaseline: 0,
@@ -147,6 +217,7 @@ export default function (pi: ExtensionAPI) {
 			lastRender: now,
 			model: event.message.responseModel ?? event.message.model ?? ctx.model?.id ?? "",
 		};
+		pendingProviderRequestTime = undefined;
 		render();
 	});
 
@@ -158,6 +229,10 @@ export default function (pi: ExtensionAPI) {
 		stream.model = event.message.responseModel ?? event.message.model ?? stream.model;
 		const update = event.assistantMessageEvent;
 		const now = Date.now();
+		const isDelta =
+			update.type === "text_delta" || update.type === "thinking_delta" || update.type === "toolcall_delta";
+		const chars = isDelta ? update.delta.length : 0;
+		if (stream.firstOutputTime === undefined && isFirstOutputEvent(update)) stream.firstOutputTime = now;
 		const providerOutput = event.message.usage.output;
 		let providerAdvanced = false;
 		let switchedToReportedUsage = false;
@@ -178,9 +253,6 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		const isDelta =
-			update.type === "text_delta" || update.type === "thinking_delta" || update.type === "toolcall_delta";
-		const chars = isDelta ? update.delta.length : 0;
 		if (chars > 0) {
 			stream.totalChars += chars;
 			if (!stream.usesReportedUsage) stream.samples.push({ t: now, tokens: estimatedTokens(chars) });
@@ -209,6 +281,7 @@ export default function (pi: ExtensionAPI) {
 			averageRate: outputTokens / Math.max(elapsedSec, 0.001),
 			peakRate,
 			model: event.message.responseModel ?? event.message.model ?? stream.model,
+			prompt: promptMetrics(stream, event.message.usage),
 		};
 		render();
 	});
