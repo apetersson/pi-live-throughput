@@ -16,8 +16,11 @@ stays visible until the next assistant response starts:
 ✓ 512 tok in 2.0s · 256 tok/s avg · peak 319 tok/s · deepseek-v4-flash
 ```
 
-Live figures are estimates based on streamed text, thinking, and tool-call
-deltas. The final token count uses Pi's provider-reported `usage.output` value.
+Live figures use Pi's cumulative provider-reported `usage.output` value when it
+advances during streaming. Providers that expose usage only after completion
+fall back to text, thinking, and tool-call delta estimates, identified by
+`est.` rates and `~` token counts. The final token count always uses the
+provider-reported value.
 
 ## Install
 

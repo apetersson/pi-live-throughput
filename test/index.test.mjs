@@ -51,11 +51,21 @@ function assistantMessage({ model = "test-model", responseModel, output = 0 } = 
 	};
 }
 
-function update(harness, delta, type = "text_delta") {
+function update(harness, delta, type = "text_delta", output = 0) {
 	harness.handlers.get("message_update")(
 		{
-			message: assistantMessage(),
+			message: assistantMessage({ output }),
 			assistantMessageEvent: { type, delta },
+		},
+		harness.ctx,
+	);
+}
+
+function usageUpdate(harness, output, type = "text_end") {
+	harness.handlers.get("message_update")(
+		{
+			message: assistantMessage({ output }),
+			assistantMessageEvent: { type, contentIndex: 0, content: "" },
 		},
 		harness.ctx,
 	);
@@ -81,11 +91,11 @@ test("keeps a stable final summary through display-mode changes", async () => {
 		const message = assistantMessage();
 
 		handlers.get("message_start")({ message }, ctx);
-		assert.deepEqual(view.widget, ["⚡ 0.0 tok/s · avg 0.0 tok/s · 0 tok · 0.0s · test-model"]);
+		assert.deepEqual(view.widget, ["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~0 tok · 0.0s · test-model"]);
 
 		setNow(1200);
 		update(harness, "x".repeat(400));
-		assert.deepEqual(view.widget, ["⚡ 500 tok/s · avg 500 tok/s · 100 tok · 0.2s · test-model"]);
+		assert.deepEqual(view.widget, ["⚡ est. 500 tok/s · avg 500 tok/s · ~100 tok · 0.2s · test-model"]);
 
 		setNow(1400);
 		update(harness, "x".repeat(400), "thinking_delta");
@@ -116,6 +126,56 @@ test("keeps a stable final summary through display-mode changes", async () => {
 	});
 });
 
+test("switches from estimated deltas to cumulative provider usage", async () => {
+	await withFakeClock(async (setNow) => {
+		const harness = createHarness();
+		const { handlers, ctx, view } = harness;
+
+		handlers.get("message_start")({ message: assistantMessage() }, ctx);
+
+		setNow(1200);
+		update(harness, "x".repeat(400));
+		assert.deepEqual(view.widget, ["⚡ est. 500 tok/s · avg 500 tok/s · ~100 tok · 0.2s · test-model"]);
+
+		setNow(1400);
+		update(harness, "x".repeat(400), "text_delta", 50);
+		assert.deepEqual(
+			view.widget,
+			["⚡ 125 tok/s · avg 125 tok/s · 50 tok · 0.4s · test-model"],
+			"the first advancing provider report replaces the heuristic and its rolling samples",
+		);
+
+		setNow(1600);
+		update(harness, "x".repeat(400), "thinking_delta", 90);
+		assert.deepEqual(view.widget, ["⚡ 150 tok/s · avg 150 tok/s · 90 tok · 0.6s · test-model"]);
+	});
+});
+
+test("observes provider usage on updates without content deltas", async () => {
+	await withFakeClock(async (setNow) => {
+		const harness = createHarness();
+		const { handlers, ctx, view } = harness;
+
+		handlers.get("message_start")({ message: assistantMessage() }, ctx);
+
+		setNow(1100);
+		usageUpdate(harness, 20);
+		assert.deepEqual(view.widget, ["⚡ 200 tok/s · avg 200 tok/s · 20 tok · 0.1s · test-model"]);
+
+		setNow(1150);
+		usageUpdate(harness, 30, "toolcall_end");
+		assert.deepEqual(
+			view.widget,
+			["⚡ 200 tok/s · avg 200 tok/s · 30 tok · 0.1s · test-model"],
+			"usage-only events render even inside the normal delta update interval",
+		);
+
+		setNow(2000);
+		handlers.get("message_end")({ message: assistantMessage({ output: 80 }) }, ctx);
+		assert.deepEqual(view.widget, ["✓ 80 tok in 1.0s · 80.0 tok/s avg · peak 200 tok/s · test-model"]);
+	});
+});
+
 test("ignores empty deltas and resets only the active measurement window", async () => {
 	await withFakeClock(async (setNow) => {
 		const harness = createHarness();
@@ -131,15 +191,15 @@ test("ignores empty deltas and resets only the active measurement window", async
 
 		setNow(5200);
 		update(harness, "x".repeat(400), "toolcall_delta");
-		assert.deepEqual(view.widget, ["⚡ 500 tok/s · avg 500 tok/s · 100 tok · 0.2s · test-model"]);
+		assert.deepEqual(view.widget, ["⚡ est. 500 tok/s · avg 500 tok/s · ~100 tok · 0.2s · test-model"]);
 
 		setNow(5300);
 		await commands.get("throughput").handler("reset", ctx);
-		assert.deepEqual(view.widget, ["⚡ 0.0 tok/s · avg 0.0 tok/s · 0 tok · 0.0s · test-model"]);
+		assert.deepEqual(view.widget, ["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~0 tok · 0.0s · test-model"]);
 
 		setNow(5500);
 		update(harness, "x".repeat(400));
-		assert.deepEqual(view.widget, ["⚡ 500 tok/s · avg 500 tok/s · 100 tok · 0.2s · test-model"]);
+		assert.deepEqual(view.widget, ["⚡ est. 500 tok/s · avg 500 tok/s · ~100 tok · 0.2s · test-model"]);
 
 		setNow(6000);
 		handlers.get("message_end")({ message: assistantMessage({ output: 500 }) }, ctx);

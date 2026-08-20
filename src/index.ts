@@ -3,8 +3,9 @@
  *
  * The default widget uses one line while streaming and replaces it with a
  * provider-usage summary that remains visible until the next response starts.
- * Live estimates count text, thinking, and tool-call delta characters using a
- * four-characters-per-token heuristic.
+ * Live metrics prefer cumulative provider usage when it advances during the
+ * stream. Until then, clearly labeled estimates count text, thinking, and
+ * tool-call delta characters using a four-characters-per-token heuristic.
  */
 
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
@@ -19,7 +20,7 @@ type DisplayMode = "widget" | "status";
 
 interface Sample {
 	t: number;
-	chars: number;
+	tokens: number;
 }
 
 interface StreamingState {
@@ -27,6 +28,10 @@ interface StreamingState {
 	responseStartTime: number;
 	measurementStartTime: number;
 	totalChars: number;
+	providerOutputBaseline: number;
+	lastProviderOutput: number;
+	reportedOutputTokens: number;
+	usesReportedUsage: boolean;
 	samples: Sample[];
 	peakRate: number;
 	lastRender: number;
@@ -65,9 +70,12 @@ export default function (pi: ExtensionAPI) {
 		stream.samples = stream.samples.filter((sample) => sample.t >= windowStart);
 		const elapsedMs = now - windowStart;
 		if (elapsedMs <= 0 || stream.samples.length === 0) return 0;
-		const chars = stream.samples.reduce((sum, sample) => sum + sample.chars, 0);
-		return estimatedTokens(chars) / (elapsedMs / 1000);
+		const tokens = stream.samples.reduce((sum, sample) => sum + sample.tokens, 0);
+		return tokens / (elapsedMs / 1000);
 	};
+
+	const liveOutputTokens = (stream: StreamingState): number =>
+		stream.usesReportedUsage ? stream.reportedOutputTokens : estimatedTokens(stream.totalChars);
 
 	const showLine = (line: string): void => {
 		if (mode === "status") {
@@ -96,12 +104,15 @@ export default function (pi: ExtensionAPI) {
 		const live = rollingRate(state, now);
 		state.peakRate = Math.max(state.peakRate, live);
 		const elapsedSec = (now - state.measurementStartTime) / 1000;
-		const averageRate = estimatedTokens(state.totalChars) / Math.max(elapsedSec, 0.001);
+		const outputTokens = liveOutputTokens(state);
+		const averageRate = outputTokens / Math.max(elapsedSec, 0.001);
+		const estimateLabel = state.usesReportedUsage ? "" : "est. ";
+		const estimateMark = state.usesReportedUsage ? "" : "~";
 		const model = state.model ? ` · ${state.model}` : "";
 		const line =
 			mode === "status"
-				? `⚡ ${fmtRate(live)} tok/s · ${fmt(estimatedTokens(state.totalChars))} tok`
-				: `⚡ ${fmtRate(live)} tok/s · avg ${fmtRate(averageRate)} tok/s · ${fmt(estimatedTokens(state.totalChars))} tok · ${elapsedSec.toFixed(1)}s${model}`;
+				? `⚡ ${estimateLabel}${fmtRate(live)} tok/s · ${estimateMark}${fmt(outputTokens)} tok`
+				: `⚡ ${estimateLabel}${fmtRate(live)} tok/s · avg ${fmtRate(averageRate)} tok/s · ${estimateMark}${fmt(outputTokens)} tok · ${elapsedSec.toFixed(1)}s${model}`;
 		showLine(line);
 	};
 
@@ -127,6 +138,10 @@ export default function (pi: ExtensionAPI) {
 			responseStartTime: now,
 			measurementStartTime: now,
 			totalChars: 0,
+			providerOutputBaseline: 0,
+			lastProviderOutput: 0,
+			reportedOutputTokens: 0,
+			usesReportedUsage: false,
 			samples: [],
 			peakRate: 0,
 			lastRender: now,
@@ -142,16 +157,37 @@ export default function (pi: ExtensionAPI) {
 		const stream = state;
 		stream.model = event.message.responseModel ?? event.message.model ?? stream.model;
 		const update = event.assistantMessageEvent;
-		if (update.type !== "text_delta" && update.type !== "thinking_delta" && update.type !== "toolcall_delta") {
-			return;
+		const now = Date.now();
+		const providerOutput = event.message.usage.output;
+		let providerAdvanced = false;
+		let switchedToReportedUsage = false;
+
+		if (Number.isFinite(providerOutput) && providerOutput > stream.lastProviderOutput) {
+			const previousOutput = Math.max(stream.lastProviderOutput, stream.providerOutputBaseline);
+			stream.lastProviderOutput = providerOutput;
+			if (providerOutput > stream.providerOutputBaseline) {
+				providerAdvanced = true;
+				if (!stream.usesReportedUsage) {
+					stream.usesReportedUsage = true;
+					stream.samples = [];
+					stream.peakRate = 0;
+					switchedToReportedUsage = true;
+				}
+				stream.reportedOutputTokens = providerOutput - stream.providerOutputBaseline;
+				stream.samples.push({ t: now, tokens: providerOutput - previousOutput });
+			}
 		}
 
-		const chars = update.delta.length;
-		if (chars === 0) return;
-		const now = Date.now();
-		stream.totalChars += chars;
-		stream.samples.push({ t: now, chars });
-		if (now - stream.lastRender >= UPDATE_INTERVAL_MS) {
+		const isDelta =
+			update.type === "text_delta" || update.type === "thinking_delta" || update.type === "toolcall_delta";
+		const chars = isDelta ? update.delta.length : 0;
+		if (chars > 0) {
+			stream.totalChars += chars;
+			if (!stream.usesReportedUsage) stream.samples.push({ t: now, tokens: estimatedTokens(chars) });
+		}
+
+		const usageOnlyUpdate = providerAdvanced && !isDelta;
+		if (switchedToReportedUsage || usageOnlyUpdate || (chars > 0 && now - stream.lastRender >= UPDATE_INTERVAL_MS)) {
 			stream.lastRender = now;
 			render();
 		}
@@ -216,6 +252,8 @@ export default function (pi: ExtensionAPI) {
 						const now = Date.now();
 						state.measurementStartTime = now;
 						state.totalChars = 0;
+						state.providerOutputBaseline = state.lastProviderOutput;
+						state.reportedOutputTokens = 0;
 						state.samples = [];
 						state.peakRate = 0;
 						state.lastRender = now;
