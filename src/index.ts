@@ -306,10 +306,17 @@ export default function (pi: ExtensionAPI): void {
 		const now = Date.now();
 		const stream = state;
 		const outputTokens = event.message.usage.output;
-		const measurementStart = stream.measurementStartTime ?? stream.responseStartTime;
-		const elapsedSec = (now - measurementStart) / 1000;
-		const measuredTokens =
+		let measurementStart = stream.measurementStartTime ?? stream.responseStartTime;
+		let measuredTokens =
 			stream.measurementStartTime === undefined ? outputTokens : measuredOutputTokens(stream, outputTokens);
+		if (measuredTokens < 1) {
+			// The window captured less than a full output token, for example a final provider
+			// total at or below the estimated baseline. Report whole-response timing rather
+			// than a misleading near-zero rate.
+			measurementStart = stream.responseStartTime;
+			measuredTokens = outputTokens;
+		}
+		const elapsedSec = (now - measurementStart) / 1000;
 		const averageRate = measuredTokens / Math.max(elapsedSec, 0.001);
 		const peakRate = Math.max(stream.peakRate, rollingRate(stream, now), averageRate);
 		state = {

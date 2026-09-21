@@ -129,6 +129,71 @@ test("starts the measurement window only after a second output token", async () 
 	});
 });
 
+test("falls back to whole-response timing when no second token is observed", async () => {
+	await withFakeClock(async (setNow) => {
+		const harness = createHarness();
+		const { handlers, ctx, view } = harness;
+
+		handlers.get("message_start")({ message: assistantMessage() }, ctx);
+
+		setNow(1200);
+		update(harness, "xxxx");
+		assert.deepEqual(
+			view.widget,
+			["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~1 tok · 0.0s · test-model"],
+			"the measurement window stays closed after a single token",
+		);
+
+		setNow(1500);
+		handlers.get("message_end")({ message: assistantMessage({ output: 2 }) }, ctx);
+		assert.deepEqual(
+			view.widget,
+			["✓ 2 tok in 0.5s · 4.0 tok/s avg · peak 4.0 tok/s · test-model"],
+			"the final summary uses whole-response timing when the window never opened",
+		);
+	});
+});
+
+test("falls back to whole-response timing when the provider total does not exceed the baseline", async () => {
+	await withFakeClock(async (setNow) => {
+		const harness = createHarness();
+		const { handlers, ctx, view } = harness;
+
+		handlers.get("message_start")({ message: assistantMessage() }, ctx);
+
+		setNow(1300);
+		update(harness, "Hello");
+		setNow(1400);
+		update(harness, " world");
+		assert.deepEqual(view.widget, ["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~3 tok · 0.0s · test-model"]);
+
+		setNow(1500);
+		handlers.get("message_end")({ message: assistantMessage({ output: 2 }) }, ctx);
+		assert.deepEqual(
+			view.widget,
+			["✓ 2 tok in 0.5s · 4.0 tok/s avg · peak 4.0 tok/s · test-model"],
+			"a clamped measured numerator falls back instead of reporting 0.0 tok/s",
+		);
+	});
+});
+
+test("falls back to whole-response timing when streamed provider usage ends at the baseline", async () => {
+	await withFakeClock(async (setNow) => {
+		const harness = createHarness();
+		const { handlers, ctx, view } = harness;
+
+		handlers.get("message_start")({ message: assistantMessage() }, ctx);
+
+		setNow(1200);
+		usageUpdate(harness, 1);
+		setNow(1400);
+		usageUpdate(harness, 2);
+		setNow(1500);
+		handlers.get("message_end")({ message: assistantMessage({ output: 2 }) }, ctx);
+		assert.deepEqual(view.widget, ["✓ 2 tok in 0.5s · 4.0 tok/s avg · peak 4.0 tok/s · test-model"]);
+	});
+});
+
 test("keeps a stable final summary through display-mode changes", async () => {
 	await withFakeClock(async (setNow) => {
 		const harness = createHarness();

@@ -30,9 +30,14 @@ token has been observed. Keeping time-to-first-token out of the measurement
 window means the rolling, average, and peak rates describe decoding speed
 rather than prompt processing, provider queueing, or network latency. Only
 tokens observed after measurement starts contribute to a rate; the token
-counters still report the response's cumulative output. When a response ends
-before a second output token arrives, the rate falls back to the whole response
-duration.
+counters still report the response's cumulative output.
+
+When a response ends before a second output token arrives, or when the measured
+window captures less than one full output token, the final summary falls back to
+whole-response timing instead of reporting a misleading near-zero rate. Because
+provider usage is cumulative, switching from the heuristic estimate to
+provider-reported usage adopts the provider's count for the response so far,
+which can include the few tokens observed just before the window opened.
 
 The duration shown next to the final rate is the measured generation window, so
 TTFT is reported separately and is never folded into the rate.
