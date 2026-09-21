@@ -6,6 +6,9 @@
  * Live metrics prefer cumulative provider usage when it advances during the
  * stream. Until then, clearly labeled estimates count text, thinking, and
  * tool-call delta characters using a four-characters-per-token heuristic.
+ * Throughput measurement starts only after a second output token has been
+ * observed, so time-to-first-token latency never dilutes rolling, average, or
+ * peak rates; the token counters still report cumulative response output.
  * Final summaries also report conservatively available prompt/cache usage and
  * request-boundary-to-first-output timing.
  */
@@ -17,6 +20,7 @@ const STATUS_KEY = "throughput";
 const WINDOW_MS = 3000;
 const UPDATE_INTERVAL_MS = 200;
 const CHARS_PER_TOKEN = 4;
+const MEASUREMENT_MIN_TOKENS = 2;
 
 type DisplayMode = "widget" | "status";
 
@@ -30,7 +34,8 @@ interface StreamingState {
 	responseStartTime: number;
 	providerRequestTime: number | undefined;
 	firstOutputTime: number | undefined;
-	measurementStartTime: number;
+	measurementStartTime: number | undefined;
+	measurementBaseline: number;
 	totalChars: number;
 	providerOutputBaseline: number;
 	lastProviderOutput: number;
@@ -130,6 +135,7 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	const rollingRate = (stream: StreamingState, now: number): number => {
+		if (stream.measurementStartTime === undefined) return 0;
 		const windowStart = Math.max(stream.measurementStartTime, now - WINDOW_MS);
 		stream.samples = stream.samples.filter((sample) => sample.t >= windowStart);
 		const elapsedMs = now - windowStart;
@@ -140,6 +146,22 @@ export default function (pi: ExtensionAPI): void {
 
 	const liveOutputTokens = (stream: StreamingState): number =>
 		stream.usesReportedUsage ? stream.reportedOutputTokens : estimatedTokens(stream.totalChars);
+
+	const measuredOutputTokens = (stream: StreamingState, total: number): number => {
+		if (stream.measurementStartTime === undefined) return 0;
+		return Math.max(0, total - stream.measurementBaseline);
+	};
+
+	const startMeasurementIfReady = (stream: StreamingState, now: number): boolean => {
+		if (stream.measurementStartTime !== undefined) return false;
+		const total = liveOutputTokens(stream);
+		if (total < MEASUREMENT_MIN_TOKENS) return false;
+		stream.measurementStartTime = now;
+		stream.measurementBaseline = total;
+		stream.samples = [];
+		stream.peakRate = 0;
+		return true;
+	};
 
 	const showLine = (line: string): void => {
 		if (mode === "status") {
@@ -169,9 +191,9 @@ export default function (pi: ExtensionAPI): void {
 		const now = Date.now();
 		const live = rollingRate(state, now);
 		state.peakRate = Math.max(state.peakRate, live);
-		const elapsedSec = (now - state.measurementStartTime) / 1000;
+		const elapsedSec = state.measurementStartTime === undefined ? 0 : (now - state.measurementStartTime) / 1000;
 		const outputTokens = liveOutputTokens(state);
-		const averageRate = outputTokens / Math.max(elapsedSec, 0.001);
+		const averageRate = elapsedSec > 0 ? measuredOutputTokens(state, outputTokens) / elapsedSec : 0;
 		const estimateLabel = state.usesReportedUsage ? "" : "est. ";
 		const estimateMark = state.usesReportedUsage ? "" : "~";
 		const model = state.model ? ` · ${state.model}` : "";
@@ -209,7 +231,8 @@ export default function (pi: ExtensionAPI): void {
 			responseStartTime: now,
 			providerRequestTime: pendingProviderRequestTime,
 			firstOutputTime: undefined,
-			measurementStartTime: now,
+			measurementStartTime: undefined,
+			measurementBaseline: 0,
 			totalChars: 0,
 			providerOutputBaseline: 0,
 			lastProviderOutput: 0,
@@ -261,8 +284,16 @@ export default function (pi: ExtensionAPI): void {
 			if (!stream.usesReportedUsage) stream.samples.push({ t: now, tokens: estimatedTokens(chars) });
 		}
 
+		if (switchedToReportedUsage && stream.measurementStartTime !== undefined) stream.measurementBaseline = 0;
+		const startedMeasurement = startMeasurementIfReady(stream, now);
+
 		const usageOnlyUpdate = providerAdvanced && !isDelta;
-		if (switchedToReportedUsage || usageOnlyUpdate || (chars > 0 && now - stream.lastRender >= UPDATE_INTERVAL_MS)) {
+		if (
+			startedMeasurement ||
+			switchedToReportedUsage ||
+			usageOnlyUpdate ||
+			(chars > 0 && now - stream.lastRender >= UPDATE_INTERVAL_MS)
+		) {
 			stream.lastRender = now;
 			render();
 		}
@@ -274,14 +305,18 @@ export default function (pi: ExtensionAPI): void {
 		hasUI = ctx.hasUI;
 		const now = Date.now();
 		const stream = state;
-		const peakRate = Math.max(stream.peakRate, rollingRate(stream, now));
-		const elapsedSec = (now - stream.responseStartTime) / 1000;
 		const outputTokens = event.message.usage.output;
+		const measurementStart = stream.measurementStartTime ?? stream.responseStartTime;
+		const elapsedSec = (now - measurementStart) / 1000;
+		const measuredTokens =
+			stream.measurementStartTime === undefined ? outputTokens : measuredOutputTokens(stream, outputTokens);
+		const averageRate = measuredTokens / Math.max(elapsedSec, 0.001);
+		const peakRate = Math.max(stream.peakRate, rollingRate(stream, now), averageRate);
 		state = {
 			kind: "final",
 			outputTokens,
 			elapsedSec,
-			averageRate: outputTokens / Math.max(elapsedSec, 0.001),
+			averageRate,
 			peakRate,
 			model: event.message.responseModel ?? event.message.model,
 			prompt: promptMetrics(stream, event.message.usage),
@@ -327,6 +362,7 @@ export default function (pi: ExtensionAPI): void {
 					if (state?.kind === "streaming") {
 						const now = Date.now();
 						state.measurementStartTime = now;
+						state.measurementBaseline = 0;
 						state.totalChars = 0;
 						state.providerOutputBaseline = state.lastProviderOutput;
 						state.reportedOutputTokens = 0;

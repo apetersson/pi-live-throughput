@@ -95,6 +95,40 @@ async function withFakeClock(run) {
 	}
 }
 
+test("starts the measurement window only after a second output token", async () => {
+	await withFakeClock(async (setNow) => {
+		const harness = createHarness();
+		const { handlers, ctx, view } = harness;
+
+		handlers.get("message_start")({ message: assistantMessage() }, ctx);
+		assert.deepEqual(view.widget, ["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~0 tok · 0.0s · test-model"]);
+
+		setNow(1200);
+		update(harness, "x".repeat(4));
+		assert.deepEqual(
+			view.widget,
+			["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~1 tok · 0.0s · test-model"],
+			"a single output token does not start the measurement clock",
+		);
+
+		setNow(1400);
+		update(harness, "x".repeat(4));
+		assert.deepEqual(
+			view.widget,
+			["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~2 tok · 0.0s · test-model"],
+			"the second output token starts a zero-length window",
+		);
+
+		setNow(1600);
+		update(harness, "x".repeat(40));
+		assert.deepEqual(
+			view.widget,
+			["⚡ est. 50.0 tok/s · avg 50.0 tok/s · ~12 tok · 0.2s · test-model"],
+			"only tokens observed after the second token contribute to the rate",
+		);
+	});
+});
+
 test("keeps a stable final summary through display-mode changes", async () => {
 	await withFakeClock(async (setNow) => {
 		const harness = createHarness();
@@ -105,26 +139,25 @@ test("keeps a stable final summary through display-mode changes", async () => {
 		assert.deepEqual(view.widget, ["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~0 tok · 0.0s · test-model"]);
 
 		setNow(1200);
-		update(harness, "x".repeat(400));
-		assert.deepEqual(view.widget, ["⚡ est. 500 tok/s · avg 500 tok/s · ~100 tok · 0.2s · test-model"]);
+		update(harness, "x".repeat(4));
 
 		setNow(1400);
-		update(harness, "x".repeat(400), "thinking_delta");
+		update(harness, "x".repeat(4), "thinking_delta");
 
 		setNow(2000);
 		handlers.get("message_end")({ message: assistantMessage({ output: 300 }) }, ctx);
-		const finalWidget = "✓ 300 tok in 1.0s · 300 tok/s avg · peak 500 tok/s · test-model";
+		const finalWidget = "✓ 300 tok in 0.6s · 497 tok/s avg · peak 497 tok/s · test-model";
 		assert.deepEqual(view.widget, [finalWidget]);
 
 		setNow(10_000);
 		await commands.get("throughput").handler("status", ctx);
 		assert.equal(view.widget, undefined);
-		assert.equal(view.status, "✓ 300 tok · 300 tok/s");
+		assert.equal(view.status, "✓ 300 tok · 497 tok/s");
 
 		await commands.get("throughput").handler("off", ctx);
 		assert.equal(view.status, undefined);
 		await commands.get("throughput").handler("", ctx);
-		assert.equal(view.status, "✓ 300 tok · 300 tok/s", "toggle restores the selected status mode");
+		assert.equal(view.status, "✓ 300 tok · 497 tok/s", "toggle restores the selected status mode");
 
 		await commands.get("throughput").handler("widget", ctx);
 		assert.deepEqual(view.widget, [finalWidget], "final values do not decay while idle");
@@ -145,20 +178,24 @@ test("switches from estimated deltas to cumulative provider usage", async () => 
 		handlers.get("message_start")({ message: assistantMessage() }, ctx);
 
 		setNow(1200);
-		update(harness, "x".repeat(400));
-		assert.deepEqual(view.widget, ["⚡ est. 500 tok/s · avg 500 tok/s · ~100 tok · 0.2s · test-model"]);
+		update(harness, "x".repeat(4));
+		assert.deepEqual(view.widget, ["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~1 tok · 0.0s · test-model"]);
 
 		setNow(1400);
-		update(harness, "x".repeat(400), "text_delta", 50);
+		update(harness, "x".repeat(4));
+		assert.deepEqual(view.widget, ["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~2 tok · 0.0s · test-model"]);
+
+		setNow(1600);
+		update(harness, "x".repeat(4), "text_delta", 50);
 		assert.deepEqual(
 			view.widget,
-			["⚡ 125 tok/s · avg 125 tok/s · 50 tok · 0.4s · test-model"],
+			["⚡ 250 tok/s · avg 250 tok/s · 50 tok · 0.2s · test-model"],
 			"the first advancing provider report replaces the heuristic and its rolling samples",
 		);
 
-		setNow(1600);
-		update(harness, "x".repeat(400), "thinking_delta", 90);
-		assert.deepEqual(view.widget, ["⚡ 150 tok/s · avg 150 tok/s · 90 tok · 0.6s · test-model"]);
+		setNow(1800);
+		update(harness, "x".repeat(4), "thinking_delta", 90);
+		assert.deepEqual(view.widget, ["⚡ 225 tok/s · avg 225 tok/s · 90 tok · 0.4s · test-model"]);
 	});
 });
 
@@ -171,7 +208,7 @@ test("observes provider usage on updates without content deltas", async () => {
 
 		setNow(1100);
 		usageUpdate(harness, 20);
-		assert.deepEqual(view.widget, ["⚡ 200 tok/s · avg 200 tok/s · 20 tok · 0.1s · test-model"]);
+		assert.deepEqual(view.widget, ["⚡ 0.0 tok/s · avg 0.0 tok/s · 20 tok · 0.0s · test-model"]);
 
 		setNow(1150);
 		usageUpdate(harness, 30, "toolcall_end");
@@ -183,7 +220,7 @@ test("observes provider usage on updates without content deltas", async () => {
 
 		setNow(2000);
 		handlers.get("message_end")({ message: assistantMessage({ output: 80 }) }, ctx);
-		assert.deepEqual(view.widget, ["✓ 80 tok in 1.0s · 80.0 tok/s avg · peak 200 tok/s · test-model"]);
+		assert.deepEqual(view.widget, ["✓ 80 tok in 0.9s · 66.7 tok/s avg · peak 200 tok/s · test-model"]);
 	});
 });
 
@@ -204,7 +241,7 @@ test("reports cached prompt metrics and excludes cache reads from approximate pr
 		);
 
 		assert.deepEqual(view.widget, [
-			"✓ 50 tok in 0.9s · 55.6 tok/s avg · peak 15.0 tok/s · input 200 tok · cache read 800 tok · cache write 100 tok · TTFT 300ms · approx. prompt 1000 tok/s · test-model",
+			"✓ 50 tok in 0.7s · 67.1 tok/s avg · peak 67.1 tok/s · input 200 tok · cache read 800 tok · cache write 100 tok · TTFT 300ms · approx. prompt 1000 tok/s · test-model",
 		]);
 		assert.doesNotMatch(
 			view.widget[0],
@@ -286,7 +323,7 @@ test("ignores empty deltas and resets only the active measurement window", async
 
 		setNow(5200);
 		update(harness, "x".repeat(400), "toolcall_delta");
-		assert.deepEqual(view.widget, ["⚡ est. 500 tok/s · avg 500 tok/s · ~100 tok · 0.2s · test-model"]);
+		assert.deepEqual(view.widget, ["⚡ est. 0.0 tok/s · avg 0.0 tok/s · ~100 tok · 0.0s · test-model"]);
 
 		setNow(5300);
 		await commands.get("throughput").handler("reset", ctx);
@@ -298,7 +335,7 @@ test("ignores empty deltas and resets only the active measurement window", async
 
 		setNow(6000);
 		handlers.get("message_end")({ message: assistantMessage({ output: 500 }) }, ctx);
-		assert.deepEqual(view.widget, ["✓ 500 tok in 1.0s · 500 tok/s avg · peak 500 tok/s · test-model"]);
+		assert.deepEqual(view.widget, ["✓ 500 tok in 0.7s · 714 tok/s avg · peak 714 tok/s · test-model"]);
 
 		handlers.get("session_shutdown")({ reason: "quit" }, ctx);
 		assert.equal(view.widget, undefined);

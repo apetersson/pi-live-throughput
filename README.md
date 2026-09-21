@@ -23,6 +23,20 @@ fall back to text, thinking, and tool-call delta estimates, identified by
 `est.` rates and `~` token counts. The final token count always uses the
 provider-reported value.
 
+## Measurement window
+
+Live and final throughput rates start measuring only after a second output
+token has been observed. Keeping time-to-first-token out of the measurement
+window means the rolling, average, and peak rates describe decoding speed
+rather than prompt processing, provider queueing, or network latency. Only
+tokens observed after measurement starts contribute to a rate; the token
+counters still report the response's cumulative output. When a response ends
+before a second output token arrives, the rate falls back to the whole response
+duration.
+
+The duration shown next to the final rate is the measured generation window, so
+TTFT is reported separately and is never folded into the rate.
+
 ## Prompt and cache metrics
 
 Pi normalizes prompt usage into separate `input`, `cacheRead`, and `cacheWrite`
